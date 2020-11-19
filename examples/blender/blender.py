@@ -2,6 +2,7 @@
 import asyncio
 import pathlib
 import sys
+import requests
 
 import yapapi
 from yapapi.log import enable_default_logger, log_summary, log_event_repr  # noqa
@@ -23,6 +24,12 @@ async def main(subnet_tag: str):
         min_mem_gib=0.5,
         min_storage_gib=2.0,
     )
+
+    url = 'https://hub.textile.io/ipfs/bafybeihpjl5e3vthvu6y33um4kuw6labeshl5utky556pg2tah4ngflvve'
+    r = requests.get(url)
+
+    with open('./cubes.blend', 'wb') as f:
+        f.write(r.content)
 
     async def worker(ctx: WorkContext, tasks):
         scene_path = str(script_dir / "cubes.blend")
