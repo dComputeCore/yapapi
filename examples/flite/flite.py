@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 import asyncio
-from datetime import timedelta
 import pathlib
 import sys
-import requests
 
 from yapapi import (
     Executor,
     Task,
     __version__ as yapapi_version,
-    WorkContext,
-    windows_event_loop_fix,
+    WorkContext
 )
 from yapapi.log import enable_default_logger, log_summary, log_event_repr  # noqa
 from yapapi.package import vm
 from yapapi.rest.activity import BatchTimeoutError
+
+from datetime import timedelta
+import requests
 
 # For importing `utils.py`:
 script_dir = pathlib.Path(__file__).resolve().parent
@@ -23,50 +23,42 @@ sys.stderr.write(f"Adding {parent_directory} to sys.path.\n")
 sys.path.append(str(parent_directory))
 import utils  # noqa
 
+async def main(subnet_tag: str, resource_url: str):
+    resource_content = requests.get(resource_url)
 
-async def main(subnet_tag: str):
+    print(f"Downloaded resource length: {len(resource_content.content)}")
+
+    open('resource.txt', 'wb').write(resource_content.content)
+    
+
     package = await vm.repo(
-        image_hash="9a3b5d67b0b27746283cb5f287c13eab1beaa12d92a9f536b747c7ae",
-        min_mem_gib=0.5,
-        min_storage_gib=2.0,
+        image_hash="895cd661f729e2b7034c0e19e4adc79830e2a1fd7e7f081b4ce0fb32",
+        min_mem_gib=4,
+        min_storage_gib=20.0,
     )
 
-    url = 'https://hub.textile.io/ipfs/bafybeihpjl5e3vthvu6y33um4kuw6labeshl5utky556pg2tah4ngflvve'
-    r = requests.get(url)
-
-    with open('./cubes.blend', 'wb') as f:
-        f.write(r.content)
-
     async def worker(ctx: WorkContext, tasks):
-        scene_path = str(script_dir / "cubes.blend")
-        ctx.send_file(scene_path, "/golem/resource/scene.blend")
         async for task in tasks:
-            frame = task.data
-            crops = [{"outfilebasename": "out", "borders_x": [0.0, 1.0], "borders_y": [0.0, 1.0]}]
-            ctx.send_json(
-                "/golem/work/params.json",
-                {
-                    "scene_file": "/golem/resource/scene.blend",
-                    "resolution": (400, 300),
-                    "use_compositing": False,
-                    "crops": crops,
-                    "samples": 100,
-                    "frames": [frame],
-                    "output_format": "PNG",
-                    "RESOURCES_DIR": "/golem/resources",
-                    "WORK_DIR": "/golem/work",
-                    "OUTPUT_DIR": "/golem/output",
-                },
+            output_file = "result.flac"
+            ctx.send_file("resource.txt", "/golem/work/resource.txt")
+
+            commands = (
+                "cd /golem/output/; " #
+                "flite -v /golem/work/resource.txt result.wav > log.txt 2>&1; "
+                "ffmpeg -i result.wav result.flac; "
             )
-            ctx.run("/golem/entrypoints/run-blender.sh")
-            output_file = f"output_{frame}.png"
-            ctx.download_file(f"/golem/output/out{frame:04d}.png", output_file)
+            
+            ctx.run("/bin/sh", "-c", commands)
+
+            ctx.download_file("/golem/output/log.txt", "log.txt")
+            ctx.download_file(f"/golem/output/{output_file}", output_file)
+
             try:
                 # Set timeout for executing the script on the provider. Two minutes is plenty
                 # of time for computing a single frame, for other tasks it may be not enough.
                 # If the timeout is exceeded, this worker instance will be shut down and all
                 # remaining tasks, including the current one, will be computed by other providers.
-                yield ctx.commit(timeout=timedelta(seconds=120))
+                yield ctx.commit(timeout=timedelta(minutes=30))
                 # TODO: Check if job results are valid
                 # and reject by: task.reject_task(reason = 'invalid file')
                 task.accept_result(result=output_file)
@@ -78,58 +70,56 @@ async def main(subnet_tag: str):
                 )
                 raise
 
-    # Iterator over the frame indices that we want to render
-    frames: range = range(0, 60, 10)
-    # Worst-case overhead, in minutes, for initialization (negotiation, file transfer etc.)
-    # TODO: make this dynamic, e.g. depending on the size of files to transfer
-    init_overhead = 3
-    # Providers will not accept work if the timeout is outside of the [5 min, 30min] range.
-    # We increase the lower bound to 6 min to account for the time needed for our demand to
-    # reach the providers.
-    min_timeout, max_timeout = 6, 30
+        ctx.log("task done")
 
-    timeout = timedelta(minutes=max(min(init_overhead + len(frames) * 2, max_timeout), min_timeout))
+    # iterator over the frame indices that we want to render
+    #nodes = [Task(data={'node': i+1, 'nodes': node_count}) for i in range(node_count)]
 
-    # By passing `event_consumer=log_summary()` we enable summary logging.
+    init_overhead: timedelta = timedelta(minutes=30)
+
+    # By passing `event_emitter=log_summary()` we enable summary logging.
     # See the documentation of the `yapapi.log` module on how to set
     # the level of detail and format of the logged information.
     async with Executor(
         package=package,
-        max_workers=3,
-        budget=10.0,
-        timeout=timeout,
+        max_workers=1, #node_count,
+        budget=30.0,
+        timeout=init_overhead, #+ timedelta(minutes=node_count * 2), add something based on content length?
         subnet_tag=subnet_tag,
         event_consumer=log_summary(log_event_repr),
     ) as executor:
 
-        async for task in executor.submit(worker, [Task(data=frame) for frame in frames]):
+        async for task in executor.submit(worker, [Task(data="")]):
             print(
                 f"{utils.TEXT_COLOR_CYAN}"
-                f"Task computed: {task}, result: {task.result}, time: {task.running_time}"
+                f"Task computed: {task}, result: {task.output}"
                 f"{utils.TEXT_COLOR_DEFAULT}"
             )
+        
+    # Processing is done, so remind the user of the parameters and show the results
+    # TODO - need to decompress the file
 
 
 if __name__ == "__main__":
-    parser = utils.build_parser("Render blender scene")
+    parser = utils.build_parser("Flite converter for Gutenberg books")
     parser.set_defaults(log_file="blender-yapapi.log")
+    parser.add_argument("resource_url")
+    # parser.add_argument("timeout_seconds")
+    # parser.add_argument("password")
+    # parser.set_defaults(log_file="john.log", node_count="4", timeout_seconds="10", password="unicorn")
     args = parser.parse_args()
 
-    # This is only required when running on Windows with Python prior to 3.8:
-    windows_event_loop_fix()
-
     enable_default_logger(log_file=args.log_file)
-
     loop = asyncio.get_event_loop()
-
     subnet = args.subnet_tag
     sys.stderr.write(
         f"yapapi version: {utils.TEXT_COLOR_YELLOW}{yapapi_version}{utils.TEXT_COLOR_DEFAULT}\n"
     )
     sys.stderr.write(f"Using subnet: {utils.TEXT_COLOR_YELLOW}{subnet}{utils.TEXT_COLOR_DEFAULT}\n")
-    task = loop.create_task(main(subnet_tag=args.subnet_tag))
+    task = loop.create_task(main(subnet_tag=args.subnet_tag, resource_url=args.resource_url))
     try:
         loop.run_until_complete(task)
+
     except KeyboardInterrupt:
         print(
             f"{utils.TEXT_COLOR_YELLOW}"
@@ -147,3 +137,4 @@ if __name__ == "__main__":
             )
         except (asyncio.CancelledError, KeyboardInterrupt):
             pass
+
