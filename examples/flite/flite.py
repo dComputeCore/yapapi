@@ -58,7 +58,7 @@ async def main(subnet_tag: str, resource_url: str):
                 # of time for computing a single frame, for other tasks it may be not enough.
                 # If the timeout is exceeded, this worker instance will be shut down and all
                 # remaining tasks, including the current one, will be computed by other providers.
-                yield ctx.commit(timeout=timedelta(minutes=30))
+                yield ctx.commit(timeout=timedelta(minutes=5))
                 # TODO: Check if job results are valid
                 # and reject by: task.reject_task(reason = 'invalid file')
                 task.accept_result(result=output_file)
